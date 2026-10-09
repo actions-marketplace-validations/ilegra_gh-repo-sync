@@ -1,0 +1,75 @@
+name: Security Gate
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gitleaks:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks (Pull Request Delta)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Scanning pull request commits between ${{ github.event.pull_request.base.sha }} and ${{ github.event.pull_request.head.sha }}"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            ghcr.io/gitleaks/gitleaks:latest \
+            detect \
+            --source=/workspace \
+            --log-opts="${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            --config=/workspace/.gitleaks.toml \
+            --verbose \
+            --redact
+
+      - name: Run Gitleaks (Full Repository History)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Scanning entire repository git history"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            ghcr.io/gitleaks/gitleaks:latest \
+            detect \
+            --source=/workspace \
+            --log-opts="--all" \
+            --config=/workspace/.gitleaks.toml \
+            --verbose \
+            --redact
+
+  codeql:
+    name: CodeQL SAST Analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # Using extended queries for deeper injection tracking
+          queries: security-extended,security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

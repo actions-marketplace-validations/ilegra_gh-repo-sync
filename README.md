@@ -34,6 +34,7 @@ jobs:
       contents: write # Required if destination uses GITHUB_TOKEN
     steps:
       - name: Sync from Azure DevOps
+        id: sync-step
         uses: ilegra/gh-repo-sync@v0
         with:
           origin-url: 'https://dev.azure.com/org/project/_git/repo'
@@ -60,6 +61,119 @@ jobs:
 | `committer-email` | No | `github-actions[bot]@users.noreply.github.com` | Committer email fallback when origin author cannot be resolved. |
 | `bot-name` | No | `""` | Legacy alias for `committer-name`. |
 | `bot-email` | No | `""` | Legacy alias for `committer-email`. |
+
+### Action Outputs
+
+The action emits execution reports directly to GitHub Actions output variables for downstream workflow steps to consume.
+
+#### `sync-result`
+A single-line JSON string containing the complete synchronization report.
+
+##### Schema Definition
+
+| Field | Type | Description |
+|---|---|---|
+| `repo_name` | `string` | Base repository name of the destination. |
+| `origin_repo` | `string` | Origin repository URL. |
+| `destination_repo` | `string` | Destination repository URL. |
+| `synced_branches` | `array[string]` | List of branch names that were synchronized or updated. |
+| `removed_branches` | `array[string]` | List of pruned branches that no longer exist in origin. |
+| `synced_tags` | `array[string]` | List of tag names synchronized to the destination. |
+| `already_disabled` | `boolean` | Flag indicating whether origin repo is disabled (sync bypassed). |
+| `errors` | `array[string]` | List of non-fatal and fatal errors collected during execution. |
+
+##### Example JSON Payload
+
+```json
+{
+  "repo_name": "destination-repo",
+  "origin_repo": "https://dev.azure.com/org/project/_git/origin-repo",
+  "destination_repo": "https://github.com/org/destination-repo.git",
+  "synced_branches": [
+    "main",
+    "feature/user-auth"
+  ],
+  "removed_branches": [
+    "feature/deprecated-flow"
+  ],
+  "synced_tags": [
+    "v1.2.0"
+  ],
+  "already_disabled": false,
+  "errors": []
+}
+```
+
+##### Consuming `sync-result` in Downstream Steps
+
+The output is accessible in subsequent steps using `${{ steps.<step-id>.outputs.sync-result }}` (where `<step-id>` matches the `id` assigned to the sync step).
+
+> [!TIP]
+> **Safe Scripting Practice**: Always pass `${{ steps.<step-id>.outputs.sync-result }}` via an environment variable (`env:`) rather than inlining it directly into shell scripts. This prevents script injection and ensures special characters are preserved.
+
+> [!NOTE]
+> **Error Handling**: When repository errors are encountered during synchronization, `gh-repo-sync` still emits the complete `sync-result` JSON with the errors populated before exiting with status code `1`. To inspect errors or run failure cleanup, configure downstream steps with `if: always()` or `if: failure()`.
+
+###### Looping Over Repositories and Processed Branches
+When synchronizing repositories within a workflow, aggregate the step outputs in an environment variable to loop through each repository and display its processed (synced and removed) branches:
+
+```yaml
+      # 1. Sync repository A
+      - name: Sync Frontend Repo
+        id: sync-frontend
+        uses: ilegra/gh-repo-sync@v0
+        with:
+          origin-url: 'https://dev.azure.com/org/project/_git/frontend'
+          origin-token: ${{ secrets.ADO_PAT }}
+          destination-url: 'https://github.com/org/frontend.git'
+          destination-token: ${{ secrets.GH_TOKEN }}
+
+      # 2. Sync repository B
+      - name: Sync Backend Repo
+        id: sync-backend
+        uses: ilegra/gh-repo-sync@v0
+        with:
+          origin-url: 'https://dev.azure.com/org/project/_git/backend'
+          origin-token: ${{ secrets.ADO_PAT }}
+          destination-url: 'https://github.com/org/backend.git'
+          destination-token: ${{ secrets.GH_TOKEN }}
+
+      # 3. Extract and loop over each repository and its processed branches
+      - name: Print Repositories and Processed Branches
+        if: always()
+        env:
+          REPOS_REPORTS: |
+            ${{ steps.sync-frontend.outputs.sync-result }}
+            ${{ steps.sync-backend.outputs.sync-result }}
+        run: |
+          echo "$REPOS_REPORTS" | grep -v '^[[:space:]]*$' | while read -r repo_json; do
+            REPO=$(echo "$repo_json" | jq -r '.repo_name')
+            echo "=========================================="
+            echo "Repository: $REPO"
+            echo "=========================================="
+
+            echo "  Synced Branches:"
+            SYNCED=$(echo "$repo_json" | jq -r '.synced_branches[]?')
+            if [ -z "$SYNCED" ]; then
+              echo "    (none)"
+            else
+              echo "$SYNCED" | while read -r branch; do
+                echo "    - $branch"
+              done
+            fi
+
+            echo "  Removed Branches:"
+            REMOVED=$(echo "$repo_json" | jq -r '.removed_branches[]?')
+            if [ -z "$REMOVED" ]; then
+              echo "    (none)"
+            else
+              echo "$REMOVED" | while read -r branch; do
+                echo "    - (deleted) $branch"
+              done
+            fi
+            echo ""
+          done
+```
 
 ## CLI / Environment Variable Configuration
 
@@ -95,7 +209,38 @@ poetry run pytest tests/unit -v
 
 # Run integration tests
 poetry run pytest tests/integration -v
+
+# Install git pre-commit hooks (including Gitleaks)
+poetry run pre-commit install
 ```
+
+## Security and Secret Scanning
+
+This repository enforces automated secret detection using [Gitleaks](https://github.com/gitleaks/gitleaks) across both local development and CI/CD pipelines.
+
+### Local Development (Shift-Left)
+To prevent sensitive tokens and credentials from ever being committed:
+```bash
+# Install the pre-commit hook into your local .git/hooks
+poetry run pre-commit install
+
+# Manually trigger the pre-commit checks on all files
+poetry run pre-commit run --all-files
+```
+
+Alternatively, run a manual scan using the official Gitleaks container:
+```bash
+docker run --rm -v "$(pwd):/workspace" -w /workspace ghcr.io/gitleaks/gitleaks:latest detect --source=/workspace --verbose --redact
+```
+
+### Pull Request & CI Quality Gate
+The `.github/workflows/security.yml` workflow enforces mandatory secret scanning on every pull request targeting `main` and on merges to `main`. Pull requests that introduce hardcoded secrets are blocked until the secrets are revoked and removed.
+
+### False Positives and Allowlists
+If Gitleaks detects a benign pattern (such as simulated tokens in mock test fixtures):
+- **Repository-wide rules / path exclusions:** Configure patterns in [`.gitleaks.toml`](.gitleaks.toml) under `[allowlist]`.
+- **Inline exceptions:** Add an inline comment next to the false positive: `# gitleaks:allow`.
+- **Fingerprint-based baseline:** Add finding fingerprints to [`.gitleaksignore`](.gitleaksignore).
 
 ## Versioning and Release Process
 

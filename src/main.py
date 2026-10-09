@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import sys
@@ -6,6 +7,7 @@ import tempfile
 import structlog
 from structlog.types import Processor
 
+from src.adapters.github_action import GithubActionOutputAdapter
 from src.config import SyncConfig
 from src.core.sync import SyncManager
 from src.git.client import Git
@@ -14,26 +16,31 @@ from src.providers.github import GitHubProvider
 
 
 def _setup_logging() -> None:
-    is_github_actions = bool(os.getenv("GITHUB_ACTIONS"))
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(colors=True),
     ]
-    if is_github_actions:
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        processors.append(structlog.dev.ConsoleRenderer())
 
     structlog.configure(
         processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
 
-def main() -> None:
-    """CLI entrypoint for repository synchronization execution."""
+def main() -> int:
+    """
+    CLI entrypoint for repository synchronization execution.
+
+    Returns:
+        int: 0 on success, 1 on failure.
+    """
     _setup_logging()
     logger = structlog.get_logger(__name__)
 
@@ -41,7 +48,7 @@ def main() -> None:
         config = SyncConfig()
     except Exception as e:
         logger.error("Configuration validation error", error=str(e))
-        sys.exit(1)
+        return 1
 
     # Setup isolated git workspace
     temp_dir = tempfile.mkdtemp(prefix="repo_sync_")
@@ -77,24 +84,29 @@ def main() -> None:
 
         result = manager.execute()
 
+        adapter = GithubActionOutputAdapter()
+        adapter.publish(result)
+    except Exception as e:
+        logger.error("Synchronization failed", error=str(e))
+        return 1
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     if result.already_disabled:
         logger.info("Origin repository is disabled. Sync skipped.")
-        sys.exit(0)
+        return 0
 
     if result.errors:
         logger.error("Sync completed with errors", errors=result.errors)
-        sys.exit(1)
+        return 1
 
     logger.info(
         "Repository sync completed successfully",
         synced=result.synced_branches,
         removed=result.removed_branches,
     )
-    sys.exit(0)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
