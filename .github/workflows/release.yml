@@ -22,15 +22,41 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  filter:
+    name: Check Code Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Filter Changed Paths
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'poetry.lock'
+              - 'Dockerfile'
+              - 'action.yml'
+              - '.github/workflows/**'
+              - '.gitleaks.toml'
+
   lint:
     name: Lint & Static Analysis
+    needs: [filter]
+    if: needs.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
@@ -55,13 +81,15 @@ jobs:
 
   unit-tests:
     name: Unit Tests
+    needs: [filter]
+    if: needs.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
@@ -80,13 +108,15 @@ jobs:
 
   integration-tests:
     name: Integration Tests
+    needs: [filter]
+    if: needs.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
@@ -105,10 +135,15 @@ jobs:
 
   release:
     name: Bump Version, Tag & Create GitHub Release
-    needs: [lint, unit-tests, integration-tests]
+    needs: [filter, lint, unit-tests, integration-tests]
     if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')) ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      always() &&
+      needs.filter.outputs.code == 'true' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      (needs.integration-tests.result == 'success' || needs.integration-tests.result == 'skipped') &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -121,13 +156,13 @@ jobs:
           private-key: ${{ secrets.SYNC_BOT_PRIVATE_KEY }}
 
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ steps.generate-token.outputs.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
@@ -186,4 +221,3 @@ jobs:
           MAJOR_TAG="v$(echo "${{ steps.bump.outputs.version }}" | cut -d. -f1)"
           git tag -fa "$MAJOR_TAG" -m "Update floating major tag $MAJOR_TAG to ${{ steps.bump.outputs.tag }}"
           git push origin "$MAJOR_TAG" --force
-
