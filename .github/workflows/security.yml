@@ -12,8 +12,34 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  filter:
+    name: Check Code Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Filter Changed Paths
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'poetry.lock'
+              - 'Dockerfile'
+              - 'action.yml'
+              - '.github/workflows/**'
+              - '.gitleaks.toml'
+
   gitleaks:
     name: Gitleaks Secret Scan
+    needs: [filter]
+    if: needs.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -53,6 +79,8 @@ jobs:
 
   codeql:
     name: CodeQL SAST Analysis
+    needs: [filter]
+    if: needs.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
